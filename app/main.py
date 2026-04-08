@@ -54,6 +54,68 @@ async def activities(access_token: str = Query(...)):
     return runs
 
 
+@app.get("/race-info")
+async def race_info(url: str = Query(...)):
+    import re
+    import anthropic
+    from app.config import settings
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        try:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            html = resp.text
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+
+    # Strip HTML tags for Claude
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+", " ", text).strip()[:12000]
+
+    prompt = f"""Extract race information from this webpage text and return ONLY a JSON object.
+
+Webpage: {url}
+
+Content:
+{text}
+
+Return this JSON structure (use null for missing fields):
+{{
+  "race_name": "string",
+  "date": "YYYY-MM-DD or string",
+  "start_time": "HH:MM or string",
+  "location": "string",
+  "distance_km": number,
+  "elevation_m": number,
+  "meeting_point": "string",
+  "bag_drop": "string or null",
+  "waves": ["Wave A: 8h00", ...] or null,
+  "website": "string",
+  "key_info": ["important note 1", "important note 2"]
+}}"""
+
+    def _call():
+        c = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        return c.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+    import asyncio
+    loop = asyncio.get_event_loop()
+    msg = await loop.run_in_executor(None, _call)
+    raw = msg.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    import json
+    try:
+        return json.loads(raw.strip())
+    except Exception:
+        return {"error": "Could not parse race info", "raw": raw}
+
+
 @app.post("/program")
 async def generate_program(body: ProgramRequest):
     athlete = await get_athlete_profile(body.access_token)
