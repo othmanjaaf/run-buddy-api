@@ -238,7 +238,7 @@ Return EXACTLY this structure:
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=180.0)
         return client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=4096,
+            max_tokens=6000,
             messages=[{"role": "user", "content": prompt}],
         )
 
@@ -253,5 +253,27 @@ Return EXACTLY this structure:
             raw_text = raw_text[4:]
     raw_text = raw_text.strip()
 
-    raw = json.loads(raw_text)
+    # Try to parse; if truncated, attempt repair
+    try:
+        raw = json.loads(raw_text)
+    except json.JSONDecodeError:
+        # Find the last complete top-level key and close the JSON
+        import re
+        # Try to close incomplete JSON by truncating at last valid array/object end
+        for end_char in [']', '}']:
+            idx = raw_text.rfind(end_char)
+            if idx != -1:
+                candidate = raw_text[:idx + 1]
+                # Close any open braces/brackets
+                open_braces = candidate.count('{') - candidate.count('}')
+                open_brackets = candidate.count('[') - candidate.count(']')
+                candidate += '}' * open_braces + ']' * open_brackets
+                try:
+                    raw = json.loads(candidate)
+                    break
+                except json.JSONDecodeError:
+                    continue
+        else:
+            raise ValueError("Claude returned invalid JSON that could not be repaired")
+
     return _convert_to_frontend(raw, race_name, start_date)
