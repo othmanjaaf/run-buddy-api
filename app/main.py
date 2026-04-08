@@ -57,47 +57,100 @@ async def activities(access_token: str = Query(...)):
 @app.get("/race-info")
 async def race_info(url: str = Query(...)):
     import re
+    import json
     import anthropic
+    from urllib.parse import urljoin
     from app.config import settings
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         try:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             html = resp.text
+            base_url = str(resp.url)
         except Exception as e:
             return JSONResponse(status_code=400, content={"error": str(e)})
 
-    # Strip HTML tags for Claude
+    # Extract image URLs that look like course maps
+    img_urls = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    course_keywords = ["parcours", "course", "map", "trace", "itinera", "plan", "circuit", "elevation", "profil"]
+    course_images = []
+    for img in img_urls:
+        if any(kw in img.lower() for kw in course_keywords):
+            full_url = urljoin(base_url, img)
+            course_images.append(full_url)
+    # Also check alt text and surrounding context
+    img_with_alt = re.findall(r'<img[^>]+alt=["\']([^"\']*parcours[^"\']*)["\'][^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+    img_with_alt += re.findall(r'<img[^>]+src=["\']([^"\']+)["\'][^>]+alt=["\']([^"\']*parcours[^"\']*)["\']', html, re.IGNORECASE)
+    for match in img_with_alt:
+        src = match[1] if len(match) > 1 else match[0]
+        full_url = urljoin(base_url, src)
+        if full_url not in course_images:
+            course_images.append(full_url)
+
+    # Strip HTML for Claude
     text = re.sub(r"<[^>]+>", " ", html)
-    text = re.sub(r"\s+", " ", text).strip()[:12000]
+    text = re.sub(r"\s+", " ", text).strip()[:14000]
 
-    prompt = f"""Extract race information from this webpage text and return ONLY a JSON object.
+    prompt = f"""You are analyzing a race/running event webpage. Extract all information and return ONLY a valid JSON object.
 
-Webpage: {url}
-
-Content:
+Webpage URL: {url}
+Page content:
 {text}
 
-Return this JSON structure (use null for missing fields):
+Return EXACTLY this JSON (null for missing fields):
 {{
   "race_name": "string",
-  "date": "YYYY-MM-DD or string",
-  "start_time": "HH:MM or string",
+  "date": "string",
+  "start_time": "string",
   "location": "string",
-  "distance_km": number,
-  "elevation_m": number,
-  "meeting_point": "string",
+  "distance_km": number or null,
+  "elevation_m": number or null,
+  "meeting_point": "string or null",
   "bag_drop": "string or null",
-  "waves": ["Wave A: 8h00", ...] or null,
-  "website": "string",
-  "key_info": ["important note 1", "important note 2"]
-}}"""
+  "waves": ["Wave A: 8h00", "Wave B: 8h30"] or null,
+  "key_info": ["max 5 important notes for runners"],
+  "course_description": "2-3 sentences describing the course profile, terrain, key segments",
+  "nutrition_points": ["km X: ravitaillement eau", "km Y: gel disponible"] or null,
+  "checklist_j7": [
+    "Récupérer son dossard à [lieu si mentionné]",
+    "Préparer sa tenue et équipement",
+    "Réduire l'intensité des entraînements",
+    "Vérifier les transports / parking",
+    "Confirmer l'heure de départ et le point de rendez-vous"
+  ],
+  "checklist_j1": [
+    "Préparer son sac : dossard, chaussures, tenue, gels",
+    "Hydratation : boire 2-3L dans la journée",
+    "Dîner glucidique léger (pâtes, riz)",
+    "Coucher tôt, réveil planifié",
+    "Vérifier la météo du lendemain",
+    "Déposer les bagages si bag drop disponible"
+  ],
+  "checklist_jour_j": [
+    "Réveil 3h avant le départ",
+    "Petit-déjeuner connu et testé à l'entraînement",
+    "Épingler le dossard",
+    "Arriver 45 min avant le départ",
+    "Échauffement 15 min avant le départ",
+    "Crème anti-frottement sur les zones sensibles",
+    "Prendre un gel 15 min avant le départ"
+  ],
+  "race_plan_segments": [
+    {{
+      "segment": "0 - X km",
+      "strategy": "Partir en douceur, 10-15 sec plus lent que l'allure cible",
+      "tip": "Ne pas se laisser emporter par l'euphorie du départ"
+    }}
+  ]
+}}
+
+For race_plan_segments: create 4-6 meaningful segments based on the actual course (climbs, flat, descents, finish). Each segment should have concrete tactical advice."""
 
     def _call():
         c = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         return c.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+            max_tokens=2000,
             messages=[{"role": "user", "content": prompt}],
         )
 
@@ -109,11 +162,12 @@ Return this JSON structure (use null for missing fields):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    import json
     try:
-        return json.loads(raw.strip())
+        result = json.loads(raw.strip())
+        result["course_images"] = course_images[:3]  # max 3 images
+        return result
     except Exception:
-        return {"error": "Could not parse race info", "raw": raw}
+        return {"error": "Could not parse race info", "course_images": course_images[:3]}
 
 
 @app.post("/program")
