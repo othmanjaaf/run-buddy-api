@@ -55,16 +55,29 @@ async def activities(access_token: str = Query(...)):
 
 
 @app.get("/proxy-image")
-async def proxy_image(url: str = Query(...)):
+async def proxy_image(request: Request, url: str = Query(...)):
     from fastapi.responses import StreamingResponse
-    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+    forward_headers = {"User-Agent": "Mozilla/5.0"}
+    if "range" in request.headers:
+        forward_headers["Range"] = request.headers["range"]
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
         try:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            content_type = resp.headers.get("content-type", "image/jpeg")
+            resp = await client.get(url, headers=forward_headers)
+            content_type = resp.headers.get("content-type", "application/octet-stream")
+            out_headers = {
+                "Cache-Control": "public, max-age=3600",
+                "Accept-Ranges": "bytes",
+                "Access-Control-Allow-Origin": "*",
+            }
+            if "content-range" in resp.headers:
+                out_headers["Content-Range"] = resp.headers["content-range"]
+            if "content-length" in resp.headers:
+                out_headers["Content-Length"] = resp.headers["content-length"]
             return StreamingResponse(
                 iter([resp.content]),
+                status_code=resp.status_code,
                 media_type=content_type,
-                headers={"Cache-Control": "public, max-age=86400"},
+                headers=out_headers,
             )
         except Exception as e:
             return JSONResponse(status_code=400, content={"error": str(e)})
@@ -114,7 +127,15 @@ async def race_info(url: str = Query(...)):
         elif not is_junk and full_url not in course_images:
             course_images.append(full_url)
 
-    # Keep only course-related images first, then fill with others (max 4 total)
+    # Also search inside HTML comments for course images
+    commented_srcs = re.findall(r'<!--.*?(?:src|data-src)=["\']([^"\']+\.(jpg|jpeg|png|webp))["\'].*?-->', html, re.IGNORECASE | re.DOTALL)
+    for match in commented_srcs:
+        src = match[0]
+        full_url = urljoin(base_url, src)
+        if full_url not in course_images:
+            course_images.insert(0, full_url)  # prioritize commented images (often placeholders for videos)
+
+    # Keep course-related images first, then fill with others (max 4 total)
     course_specific = [u for u in course_images if any(kw in u.lower() for kw in course_keywords)]
     other_images = [u for u in course_images if u not in course_specific]
     course_images = (course_specific + other_images)[:4]
