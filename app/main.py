@@ -17,6 +17,12 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    import traceback
+    return JSONResponse(status_code=500, content={"error": str(exc), "trace": traceback.format_exc()})
+
+
 @app.get("/auth/login")
 def strava_login(frontend_origin: str = Query(default="http://localhost:8080")):
     url = get_authorization_url(frontend_origin=frontend_origin)
