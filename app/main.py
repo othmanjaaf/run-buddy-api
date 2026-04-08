@@ -8,17 +8,10 @@ from app.models.schemas import ProgramRequest
 
 app = FastAPI(title="Strava Running Program Generator")
 
-import os
-
-ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS",
-    "http://localhost:8080,http://192.168.1.100:8080"
-).split(",")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

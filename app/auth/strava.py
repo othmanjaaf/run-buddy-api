@@ -16,8 +16,7 @@ def get_authorization_url(frontend_origin: str = "http://localhost:8080") -> str
         "scope": "read,activity:read_all",
         "state": urllib.parse.quote(frontend_origin, safe=""),
     }
-    query = "&".join(f"{k}={v}" for k, v in params.items())
-    return f"{STRAVA_AUTH_URL}?{query}"
+    return f"{STRAVA_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
 async def exchange_code_for_token(code: str) -> dict:
