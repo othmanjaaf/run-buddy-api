@@ -54,6 +54,22 @@ async def activities(access_token: str = Query(...)):
     return runs
 
 
+@app.get("/proxy-image")
+async def proxy_image(url: str = Query(...)):
+    from fastapi.responses import StreamingResponse
+    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+        try:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            return StreamingResponse(
+                iter([resp.content]),
+                media_type=content_type,
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+        except Exception as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+
+
 @app.get("/race-info")
 async def race_info(url: str = Query(...)):
     import re
@@ -70,22 +86,38 @@ async def race_info(url: str = Query(...)):
         except Exception as e:
             return JSONResponse(status_code=400, content={"error": str(e)})
 
-    # Extract image URLs that look like course maps
-    img_urls = re.findall(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
-    course_keywords = ["parcours", "course", "map", "trace", "itinera", "plan", "circuit", "elevation", "profil"]
+    course_keywords = ["parcours", "course", "map", "trace", "itinera", "plan", "circuit", "elevation", "profil", "route", "track"]
     course_images = []
-    for img in img_urls:
-        if any(kw in img.lower() for kw in course_keywords):
-            full_url = urljoin(base_url, img)
-            course_images.append(full_url)
-    # Also check alt text and surrounding context
-    img_with_alt = re.findall(r'<img[^>]+alt=["\']([^"\']*parcours[^"\']*)["\'][^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
-    img_with_alt += re.findall(r'<img[^>]+src=["\']([^"\']+)["\'][^>]+alt=["\']([^"\']*parcours[^"\']*)["\']', html, re.IGNORECASE)
-    for match in img_with_alt:
-        src = match[1] if len(match) > 1 else match[0]
+    course_videos = []
+
+    # Extract <video> and <source> tags for course map videos
+    video_tags = re.findall(r'<(?:video|source)[^>]+>', html, re.IGNORECASE)
+    for tag in video_tags:
+        srcs = re.findall(r'src=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        for src in srcs:
+            if any(kw in src.lower() for kw in course_keywords) or any(ext in src.lower() for ext in [".webm", ".mp4"]):
+                full_url = urljoin(base_url, src)
+                if full_url not in course_videos:
+                    course_videos.append(full_url)
+
+    # Extract images (including commented-out ones)
+    all_img_srcs = re.findall(r'(?:src|data-src|data-lazy-src|data-original)=["\']([^"\']+\.(jpg|jpeg|png|webp|gif))["\']', html, re.IGNORECASE)
+    for match in all_img_srcs:
+        src = match[0]
+        if src.startswith("data:"):
+            continue
         full_url = urljoin(base_url, src)
-        if full_url not in course_images:
+        is_course = any(kw in src.lower() for kw in course_keywords)
+        is_junk = any(x in src.lower() for x in ["icon", "logo", "avatar", "sprite", "favicon", "emoji"])
+        if is_course and full_url not in course_images:
             course_images.append(full_url)
+        elif not is_junk and full_url not in course_images:
+            course_images.append(full_url)
+
+    # Keep only course-related images first, then fill with others (max 4 total)
+    course_specific = [u for u in course_images if any(kw in u.lower() for kw in course_keywords)]
+    other_images = [u for u in course_images if u not in course_specific]
+    course_images = (course_specific + other_images)[:4]
 
     # Strip HTML for Claude
     text = re.sub(r"<[^>]+>", " ", html)
@@ -164,10 +196,11 @@ For race_plan_segments: create 4-6 meaningful segments based on the actual cours
             raw = raw[4:]
     try:
         result = json.loads(raw.strip())
-        result["course_images"] = course_images[:3]  # max 3 images
+        result["course_images"] = course_images
+        result["course_videos"] = course_videos[:2]
         return result
     except Exception:
-        return {"error": "Could not parse race info", "course_images": course_images[:3]}
+        return {"error": "Could not parse race info", "course_images": course_images, "course_videos": course_videos[:2]}
 
 
 @app.post("/program")
